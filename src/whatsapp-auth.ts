@@ -13,6 +13,8 @@ import pino from 'pino';
 import qrcode from 'qrcode-terminal';
 import readline from 'readline';
 
+import { HttpsProxyAgent } from 'https-proxy-agent';
+
 import {
   makeWASocket,
   Browsers,
@@ -87,6 +89,9 @@ async function connectSocket(
     );
     return { version: undefined };
   });
+  const proxyUrl = process.env.https_proxy || process.env.HTTPS_PROXY;
+  const agent = proxyUrl ? new HttpsProxyAgent(proxyUrl) : undefined;
+
   const sock = makeWASocket({
     version,
     auth: {
@@ -96,6 +101,7 @@ async function connectSocket(
     printQRInTerminal: false,
     logger,
     browser: Browsers.macOS('Chrome'),
+    ...(agent && { agent, fetchAgent: agent }),
   });
 
   if (usePairingCode && phoneNumber && !state.creds.me) {
