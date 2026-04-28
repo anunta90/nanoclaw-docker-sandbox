@@ -496,6 +496,343 @@ Use available_groups.json to find the JID for a group. The folder name must be c
   },
 );
 
+// ─── Second Brain: Wallabag ───────────────────────────────────────────────────
+
+interface WallabagToken {
+  access_token: string;
+  expires_at: number;
+}
+
+let _wallabagToken: WallabagToken | null = null;
+
+function wallabagConfigured(): boolean {
+  return !!(
+    process.env.WALLABAG_URL &&
+    process.env.WALLABAG_CLIENT_ID &&
+    process.env.WALLABAG_CLIENT_SECRET &&
+    process.env.WALLABAG_USERNAME &&
+    process.env.WALLABAG_PASSWORD
+  );
+}
+
+function wallabagNotConfigured() {
+  return {
+    content: [
+      {
+        type: 'text' as const,
+        text: 'Wallabag is not configured. Add WALLABAG_URL, WALLABAG_CLIENT_ID, WALLABAG_CLIENT_SECRET, WALLABAG_USERNAME, and WALLABAG_PASSWORD to .env.',
+      },
+    ],
+    isError: true,
+  };
+}
+
+async function wallabagAuth(): Promise<string> {
+  if (_wallabagToken && Date.now() < _wallabagToken.expires_at - 60_000) {
+    return _wallabagToken.access_token;
+  }
+  const base = process.env.WALLABAG_URL!.replace(/\/$/, '');
+  const resp = await fetch(`${base}/oauth/v2/token`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+    body: new URLSearchParams({
+      grant_type: 'password',
+      client_id: process.env.WALLABAG_CLIENT_ID!,
+      client_secret: process.env.WALLABAG_CLIENT_SECRET!,
+      username: process.env.WALLABAG_USERNAME!,
+      password: process.env.WALLABAG_PASSWORD!,
+    }),
+  });
+  if (!resp.ok) {
+    throw new Error(`Wallabag auth failed (${resp.status}): ${await resp.text()}`);
+  }
+  const data = (await resp.json()) as { access_token: string; expires_in: number };
+  _wallabagToken = { access_token: data.access_token, expires_at: Date.now() + data.expires_in * 1000 };
+  return _wallabagToken.access_token;
+}
+
+async function wallabagFetch(method: string, endpoint: string, body?: object): Promise<unknown> {
+  const base = process.env.WALLABAG_URL!.replace(/\/$/, '');
+  const token = await wallabagAuth();
+  const resp = await fetch(`${base}${endpoint}`, {
+    method,
+    headers: {
+      Authorization: `Bearer ${token}`,
+      'Content-Type': 'application/json',
+      Accept: 'application/json',
+    },
+    body: body ? JSON.stringify(body) : undefined,
+  });
+  if (!resp.ok) {
+    throw new Error(`Wallabag API error (${resp.status}): ${await resp.text()}`);
+  }
+  return resp.json();
+}
+
+server.tool(
+  'wallabag_get_entries',
+  'List articles from your Wallabag read-later library. Returns ID, title, URL, tags, and reading time per entry. Use the ID with wallabag_get_entry to fetch full content.',
+  {
+    status: z
+      .enum(['unread', 'archived', 'starred', 'all'])
+      .default('unread')
+      .describe('Filter by status: unread (default), archived, starred, or all'),
+    page: z.number().int().min(1).default(1).describe('Page number (default: 1)'),
+    per_page: z
+      .number()
+      .int()
+      .min(1)
+      .max(100)
+      .default(20)
+      .describe('Results per page, max 100 (default: 20)'),
+  },
+  async (args) => {
+    if (!wallabagConfigured()) return wallabagNotConfigured();
+    try {
+      const params = new URLSearchParams({
+        sort: 'created',
+        order: 'desc',
+        page: String(args.page),
+        perPage: String(args.per_page),
+        detail: 'metadata',
+      });
+      if (args.status === 'unread') params.set('archive', '0');
+      else if (args.status === 'archived') params.set('archive', '1');
+      else if (args.status === 'starred') params.set('starred', '1');
+
+      const data = (await wallabagFetch('GET', `/api/entries?${params}`)) as {
+        _embedded: {
+          items: Array<{
+            id: number;
+            title: string;
+            url: string;
+            reading_time: number;
+            is_archived: number;
+            is_starred: number;
+            created_at: string;
+            tags: Array<{ label: string }>;
+          }>;
+        };
+        total: number;
+        page: number;
+        pages: number;
+      };
+
+      const items = data._embedded?.items ?? [];
+      if (items.length === 0) {
+        return { content: [{ type: 'text' as const, text: 'No articles found.' }] };
+      }
+
+      const lines = items.map(
+        (e) =>
+          `[${e.id}] ${e.title || '(no title)'}\n  URL: ${e.url}\n  Tags: ${e.tags.map((t) => t.label).join(', ') || 'none'} | ${e.reading_time} min read | Added: ${e.created_at.slice(0, 10)}`,
+      );
+
+      return {
+        content: [
+          {
+            type: 'text' as const,
+            text: `${data.total} total (page ${data.page}/${data.pages}):\n\n${lines.join('\n\n')}`,
+          },
+        ],
+      };
+    } catch (err) {
+      return {
+        content: [{ type: 'text' as const, text: `Error: ${err instanceof Error ? err.message : String(err)}` }],
+        isError: true,
+      };
+    }
+  },
+);
+
+server.tool(
+  'wallabag_get_entry',
+  'Fetch the full text content of a Wallabag article by its ID. Use wallabag_get_entries to find IDs.',
+  {
+    id: z.number().int().describe('The Wallabag entry ID'),
+  },
+  async (args) => {
+    if (!wallabagConfigured()) return wallabagNotConfigured();
+    try {
+      const entry = (await wallabagFetch('GET', `/api/entries/${args.id}`)) as {
+        id: number;
+        title: string;
+        url: string;
+        content: string;
+        reading_time: number;
+        created_at: string;
+        tags: Array<{ label: string }>;
+      };
+
+      const plainContent = entry.content
+        ? entry.content.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim()
+        : '(no content extracted)';
+
+      const text = [
+        `# ${entry.title || '(no title)'}`,
+        `URL: ${entry.url}`,
+        `Tags: ${entry.tags.map((t) => t.label).join(', ') || 'none'} | ${entry.reading_time} min read | Added: ${entry.created_at.slice(0, 10)}`,
+        '',
+        plainContent,
+      ].join('\n');
+
+      return { content: [{ type: 'text' as const, text }] };
+    } catch (err) {
+      return {
+        content: [{ type: 'text' as const, text: `Error: ${err instanceof Error ? err.message : String(err)}` }],
+        isError: true,
+      };
+    }
+  },
+);
+
+server.tool(
+  'wallabag_add_entry',
+  'Save a URL to your Wallabag read-later library. Wallabag fetches the article content automatically.',
+  {
+    url: z.string().url().describe('The URL to save'),
+    title: z.string().optional().describe('Custom title (optional — auto-fetched if omitted)'),
+    tags: z
+      .array(z.string())
+      .optional()
+      .describe('Tags to apply, e.g. ["ai", "research"]'),
+    starred: z.boolean().optional().describe('Star the entry immediately (default: false)'),
+  },
+  async (args) => {
+    if (!wallabagConfigured()) return wallabagNotConfigured();
+    try {
+      const body: Record<string, unknown> = { url: args.url };
+      if (args.title) body.title = args.title;
+      if (args.tags?.length) body.tags = args.tags.join(',');
+      if (args.starred) body.starred = 1;
+
+      const entry = (await wallabagFetch('POST', '/api/entries', body)) as {
+        id: number;
+        title: string;
+      };
+
+      return {
+        content: [
+          {
+            type: 'text' as const,
+            text: `Saved to Wallabag: "${entry.title || args.url}" (ID: ${entry.id})`,
+          },
+        ],
+      };
+    } catch (err) {
+      return {
+        content: [{ type: 'text' as const, text: `Error: ${err instanceof Error ? err.message : String(err)}` }],
+        isError: true,
+      };
+    }
+  },
+);
+
+server.tool(
+  'wallabag_update_entry',
+  'Archive, star, or retag a Wallabag entry. Only provided fields are changed.',
+  {
+    id: z.number().int().describe('The Wallabag entry ID'),
+    archive: z.boolean().optional().describe('true = mark as read/archived, false = mark unread'),
+    starred: z.boolean().optional().describe('true = star, false = unstar'),
+    tags: z
+      .array(z.string())
+      .optional()
+      .describe('Replace all tags with this list (empty array removes all tags)'),
+  },
+  async (args) => {
+    if (!wallabagConfigured()) return wallabagNotConfigured();
+    try {
+      const body: Record<string, unknown> = {};
+      if (args.archive !== undefined) body.archive = args.archive ? 1 : 0;
+      if (args.starred !== undefined) body.starred = args.starred ? 1 : 0;
+      if (args.tags !== undefined) body.tags = args.tags.join(',');
+
+      await wallabagFetch('PATCH', `/api/entries/${args.id}`, body);
+
+      const actions: string[] = [];
+      if (args.archive !== undefined) actions.push(args.archive ? 'archived' : 'marked unread');
+      if (args.starred !== undefined) actions.push(args.starred ? 'starred' : 'unstarred');
+      if (args.tags !== undefined) actions.push(`tags → [${args.tags.join(', ') || 'none'}]`);
+
+      return {
+        content: [
+          { type: 'text' as const, text: `Entry ${args.id}: ${actions.join(', ')}.` },
+        ],
+      };
+    } catch (err) {
+      return {
+        content: [{ type: 'text' as const, text: `Error: ${err instanceof Error ? err.message : String(err)}` }],
+        isError: true,
+      };
+    }
+  },
+);
+
+server.tool(
+  'wallabag_search',
+  'Search your Wallabag library by keyword. Searches titles, content, and URLs.',
+  {
+    term: z.string().describe('Search keyword or phrase'),
+    status: z
+      .enum(['unread', 'archived', 'starred', 'all'])
+      .default('all')
+      .describe('Filter by status (default: all)'),
+  },
+  async (args) => {
+    if (!wallabagConfigured()) return wallabagNotConfigured();
+    try {
+      const params = new URLSearchParams({
+        term: args.term,
+        sort: 'created',
+        order: 'desc',
+        perPage: '20',
+      });
+      if (args.status === 'unread') params.set('archive', '0');
+      else if (args.status === 'archived') params.set('archive', '1');
+      else if (args.status === 'starred') params.set('starred', '1');
+
+      const data = (await wallabagFetch('GET', `/api/entries?${params}`)) as {
+        _embedded: {
+          items: Array<{
+            id: number;
+            title: string;
+            url: string;
+            reading_time: number;
+            is_archived: number;
+            tags: Array<{ label: string }>;
+          }>;
+        };
+        total: number;
+      };
+
+      const items = data._embedded?.items ?? [];
+      if (items.length === 0) {
+        return { content: [{ type: 'text' as const, text: `No results for "${args.term}".` }] };
+      }
+
+      const lines = items.map(
+        (e) =>
+          `[${e.id}] ${e.title || '(no title)'} — ${e.reading_time} min | tags: ${e.tags.map((t) => t.label).join(', ') || 'none'}\n  ${e.url}`,
+      );
+
+      return {
+        content: [
+          {
+            type: 'text' as const,
+            text: `${data.total} result(s) for "${args.term}":\n\n${lines.join('\n\n')}`,
+          },
+        ],
+      };
+    } catch (err) {
+      return {
+        content: [{ type: 'text' as const, text: `Error: ${err instanceof Error ? err.message : String(err)}` }],
+        isError: true,
+      };
+    }
+  },
+);
+
 // Start the stdio transport
 const transport = new StdioServerTransport();
 await server.connect(transport);

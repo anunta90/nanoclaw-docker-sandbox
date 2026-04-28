@@ -10,6 +10,11 @@ const envConfig = readEnvFile([
   'ASSISTANT_HAS_OWN_NUMBER',
   'ONECLI_URL',
   'TZ',
+  'WALLABAG_URL',
+  'WALLABAG_CLIENT_ID',
+  'WALLABAG_CLIENT_SECRET',
+  'WALLABAG_USERNAME',
+  'WALLABAG_PASSWORD',
 ]);
 
 export const ASSISTANT_NAME =
@@ -95,3 +100,15 @@ function resolveConfigTimezone(): string {
   return 'UTC';
 }
 export const TIMEZONE = resolveConfigTimezone();
+
+// Second Brain — Wallabag credentials (passed into containers as env vars)
+export const WALLABAG_URL =
+  process.env.WALLABAG_URL || envConfig.WALLABAG_URL || '';
+export const WALLABAG_CLIENT_ID =
+  process.env.WALLABAG_CLIENT_ID || envConfig.WALLABAG_CLIENT_ID || '';
+export const WALLABAG_CLIENT_SECRET =
+  process.env.WALLABAG_CLIENT_SECRET || envConfig.WALLABAG_CLIENT_SECRET || '';
+export const WALLABAG_USERNAME =
+  process.env.WALLABAG_USERNAME || envConfig.WALLABAG_USERNAME || '';
+export const WALLABAG_PASSWORD =
+  process.env.WALLABAG_PASSWORD || envConfig.WALLABAG_PASSWORD || '';

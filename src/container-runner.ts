@@ -15,6 +15,11 @@ import {
   IDLE_TIMEOUT,
   ONECLI_URL,
   TIMEZONE,
+  WALLABAG_CLIENT_ID,
+  WALLABAG_CLIENT_SECRET,
+  WALLABAG_PASSWORD,
+  WALLABAG_URL,
+  WALLABAG_USERNAME,
 } from './config.js';
 import { resolveGroupFolderPath, resolveGroupIpcPath } from './group-folder.js';
 import { logger } from './logger.js';
@@ -232,6 +237,15 @@ async function buildContainerArgs(
 
   // Pass host timezone so container's local time matches the user's
   args.push('-e', `TZ=${TIMEZONE}`);
+
+  // Pass second-brain credentials (read from .env, never from mounted volumes)
+  if (WALLABAG_URL) {
+    args.push('-e', `WALLABAG_URL=${WALLABAG_URL}`);
+    args.push('-e', `WALLABAG_CLIENT_ID=${WALLABAG_CLIENT_ID}`);
+    args.push('-e', `WALLABAG_CLIENT_SECRET=${WALLABAG_CLIENT_SECRET}`);
+    args.push('-e', `WALLABAG_USERNAME=${WALLABAG_USERNAME}`);
+    args.push('-e', `WALLABAG_PASSWORD=${WALLABAG_PASSWORD}`);
+  }
 
   // OneCLI gateway handles credential injection — containers never see real secrets.
   // The gateway intercepts HTTPS traffic and injects API keys or OAuth tokens.
